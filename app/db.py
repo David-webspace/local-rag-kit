@@ -1,13 +1,36 @@
+import logging
+
 import psycopg
 from pgvector.psycopg import register_vector
 from psycopg_pool import ConnectionPool
 
 from app import config
 
+logger = logging.getLogger("uvicorn.error")
+
+
+def _drop_if_dim_changed(conn: psycopg.Connection) -> None:
+    # pgvector 欄位的維度存在 atttypmod；跟 EMBED_DIM 不同代表換了 embedding 模型，舊向量全部不可用
+    row = conn.execute(
+        "SELECT atttypmod FROM pg_attribute WHERE attrelid = to_regclass('chunks') AND attname = 'embedding'"
+    ).fetchone()
+    if row and row[0] != config.EMBED_DIM:
+        logger.warning("EMBED_DIM %s -> %s：重建向量表，請重新執行 ETL", row[0], config.EMBED_DIM)
+        conn.execute("DROP TABLE IF EXISTS chunks, documents, semantic_cache")
+
+
+HNSW_MAX_DIM = 2000
+
 
 def init_schema() -> None:
+    if config.EMBED_DIM > HNSW_MAX_DIM:
+        raise ValueError(
+            f"EMBED_DIM={config.EMBED_DIM} 超過 pgvector HNSW 上限 {HNSW_MAX_DIM}；"
+            "請改用 1536 或 768（text-embedding-3-* / gemini-embedding-* 會自動帶 dimensions 參數）"
+        )
     with psycopg.connect(config.PG_DSN, autocommit=True) as conn:
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        _drop_if_dim_changed(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS documents (

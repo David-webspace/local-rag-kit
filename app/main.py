@@ -12,10 +12,10 @@ from pydantic import BaseModel, Field
 
 from app import agent, cache, config, llm, rag
 from app.db import init_schema, pool
-from app.etl import ingest
+from app.etl import SUPPORTED, ingest
 
 logger = logging.getLogger("uvicorn.error")
-ALLOWED_SUFFIXES = {".pdf", ".md", ".txt", ".csv"}
+ALLOWED_SUFFIXES = SUPPORTED
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 

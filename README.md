@@ -9,7 +9,7 @@
 ```
 
 - 全部服務只綁 `127.0.0.1`，不需要任何雲端帳號就能跑
-- 約 1,100 行程式碼（Python 約 800 行 + 單頁 HTML），沒有 LangChain 這類框架，agent loop 也是手寫，每一步都看得到
+- 約 1,300 行程式碼（Python 約 950 行 + 單頁 HTML），沒有 LangChain 這類框架，agent loop 也是手寫，每一步都看得到
 - 附範例資料（員工手冊、服務條款、12 筆商品），啟動後可以直接問
 
 ---
@@ -22,6 +22,7 @@
 - [使用方式](#使用方式)
 - [運作原理](#運作原理)
 - [Agent 與 Tool Use](#agent-與-tool-use)
+- [拿到 API key 之後](#拿到-api-key-之後)
 - [設定](#設定)
 - [專案結構](#專案結構)
 - [實測數據](#實測數據)
@@ -125,11 +126,13 @@ uv run --env-file .env uvicorn app.main:app --port 8010 --reload
 
 ### 選用：雲端模型
 
-Agent 雲端模式預設用 Gemini。`OPENAI_API_KEY` 留空時會自動讀 shell 的 `GEMINI_API_KEY`，key 不用寫進專案檔案：
+Agent 雲端模式預設用 Gemini。`CLOUD_API_KEY` 留空時會自動讀 shell 的 `GEMINI_API_KEY`，key 不用寫進專案檔案：
 
 ```bash
 export GEMINI_API_KEY=your-key   # 建議放在 ~/.zshenv
 ```
+
+其他供應商（OpenAI、Claude、Azure）見[拿到 API key 之後](#拿到-api-key-之後)。
 
 ### 選用：Open WebUI
 
@@ -156,7 +159,7 @@ docker compose --profile ui up -d
 | Method | Path | 說明 |
 |---|---|---|
 | `GET` | `/health` | PostgreSQL / Redis / Ollama 狀態、chunk 數、目前使用的模型 |
-| `POST` | `/ingest` | multipart 上傳 `.pdf` `.md` `.txt` `.csv`，單檔上限 20MB；內容沒變會跳過 |
+| `POST` | `/ingest` | multipart 上傳 `.pdf` `.docx` `.md` `.txt` `.csv` `.xlsx` `.json`，單檔上限 20MB；內容沒變會跳過 |
 | `GET` | `/search?q=&k=` | 只做檢索，回傳 top-k chunk 與相似度，用來 debug 切塊與召回 |
 | `POST` | `/ask` | `{"question": "...", "use_cache": true}` → 答案、來源、快取層、耗時 |
 | `POST` | `/ask/stream` | 同上，SSE 串流，事件依序為 `sources` → 多個 token → `done`（`{cache, ms}`） |
@@ -173,7 +176,7 @@ curl -s -X POST localhost:8010/ask \
 ```json
 {
   "answer": "不可以，試用期（前三個月）的員工不適用遠端工作 [1]。",
-  "sources": [{"source": "handbook.md", "chunk_index": 2, "score": 0.7287, "preview": "## 遠端工作\n每週最多可遠端工作 2 天…"}],
+  "sources": [{"source": "handbook.md", "chunk_index": 1, "score": 0.7287, "preview": "## 遠端工作\n每週最多可遠端工作 2 天…"}],
   "cache": "miss",
   "ms": 2886
 }
@@ -191,7 +194,7 @@ curl -s -G localhost:8010/search --data-urlencode "q=發票期限" -d k=3
 uv run --env-file .env python -m app.etl path/to/docs
 ```
 
-或在聊天頁按「上傳文件」。
+或在聊天頁按「上傳文件」。支援 `.pdf` `.docx` `.md` `.txt` `.csv` `.xlsx` `.json`。
 
 ---
 
@@ -203,13 +206,19 @@ uv run --env-file .env python -m app.etl path/to/docs
 extract → clean → chunk → embed → upsert → 清快取
 ```
 
-1. **Extract**（`etl.extract`）：PDF 逐頁抽文字；CSV 每列攤平成 `欄位: 值；欄位: 值`；Markdown / TXT 直接讀。
+1. **Extract**（`etl.split`）：依副檔名分兩類處理。
+
+   | 類型 | 格式 | 處理方式 |
+   |---|---|---|
+   | 表格類（一筆一個 chunk） | `.csv`、`.xlsx`、物件陣列 `.json` | 每筆攤平成 `欄位: 值；欄位: 值`；Excel 加上 `[工作表名]`、略過空白列與空欄位；巢狀值轉成 JSON 字串 |
+   | 文件類（走切塊） | `.pdf`、`.docx`、`.md`、`.txt`、其他 `.json` | PDF 逐頁抽字；Word 的 Title / Heading N 樣式轉成 Markdown 標題，表格每列攤平；非物件陣列的 JSON 以縮排文字處理 |
+
 2. **Clean**（`etl.clean`）：統一換行、全形空白、壓縮多餘空行。
-3. **Chunk**（`etl.chunk`）：
+3. **Chunk**（`etl.chunk`，文件類）：
    - 以空行切段落，累積到 `CHUNK_SIZE`（預設 500 字）為一塊
    - 遇到 Markdown 標題（`#`）強制斷開，不跨主題、不帶 overlap
+   - 只有標題沒有內文的段落（例如文件大標）併進下一塊，避免產生沒有內容的 chunk 佔用檢索名額
    - 超長段落用固定長度切，相鄰塊重疊 `CHUNK_OVERLAP`（預設 80 字）避免語意被切斷
-   - CSV 一列就是一塊，保證同一筆資料完整
 4. **Embed**：每 32 塊一批送 bge-m3。
 5. **Upsert**：先比對檔案 sha256，沒變就跳過；有變則在**同一個 transaction** 內刪除舊文件（`ON DELETE CASCADE` 連帶刪舊 chunks）並寫入新的，不會出現新舊混雜的狀態。
 6. **清快取**：知識庫變了，舊答案可能過期。
@@ -304,19 +313,86 @@ for step in 1..AGENT_MAX_STEPS:
 
 ---
 
+## 拿到 API key 之後
+
+切換供應商只改 `.env`，不改程式。流程：
+
+1. 把 key 貼進 `.env` 的 `CLOUD_API_KEY`（`.env` 已在 `.gitignore`，不要貼進程式碼）
+2. 依供應商改下表對應的幾行
+3. 自檢：
+   ```bash
+   uv run --env-file .env python -m app.check
+   ```
+   會檢查 embedding（含實際維度）、生成、地端與雲端 tool calling，每項顯示 PASS / FAIL 與原因
+4. 換了 embedding 模型 → 重跑 ETL（向量表會在維度改變時自動重建）
+5. **重啟 API server**：`--env-file` 只在啟動時讀一次，`--reload` 不會重讀 `.env`
+
+### 各家設定
+
+**OpenAI**
+```env
+CLOUD_BASE_URL=https://api.openai.com/v1
+CLOUD_CHAT_MODEL=<信上指定的模型>
+# 要用雲端 embedding 時：
+EMBED_PROVIDER=openai
+EMBED_MODEL=text-embedding-3-small
+EMBED_DIM=1536
+```
+
+**Gemini**
+```env
+CLOUD_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+CLOUD_CHAT_MODEL=gemini-flash-latest
+# 要用雲端 embedding 時（預設 3072 維超過 HNSW 上限，程式會自動帶 dimensions 縮短）：
+EMBED_PROVIDER=openai
+EMBED_MODEL=gemini-embedding-001
+EMBED_DIM=768
+```
+
+**Claude**（Anthropic 的 OpenAI 相容端點）
+```env
+CLOUD_BASE_URL=https://api.anthropic.com/v1
+CLOUD_CHAT_MODEL=<信上指定的模型，例如 claude-sonnet-5-5>
+# Claude 沒有 embedding API → EMBED_PROVIDER 維持 ollama（bge-m3），檢索留在地端
+```
+
+**Azure OpenAI**（URL 帶 deployment 名稱、用 `api-key` header）
+```env
+CLOUD_BASE_URL=https://<resource>.openai.azure.com/openai/deployments/<chat-deployment>
+CLOUD_AUTH=api-key
+CLOUD_API_VERSION=2024-10-21
+CLOUD_CHAT_MODEL=<chat-deployment>
+# embedding 是另一個 deployment：
+CLOUD_EMBED_BASE_URL=https://<resource>.openai.azure.com/openai/deployments/<embedding-deployment>
+EMBED_PROVIDER=openai
+EMBED_MODEL=<embedding-deployment>
+EMBED_DIM=1536
+```
+
+**生成和 embedding 用不同家**：`LLM_PROVIDER` 與 `EMBED_PROVIDER` 各自設定；embedding 走不同端點或 key 時填 `CLOUD_EMBED_BASE_URL`、`CLOUD_EMBED_API_KEY`。
+
+### 已演練與未驗證
+
+- 已演練：把 Ollama 的 OpenAI 相容端點（`http://127.0.0.1:11434/v1`）當成雲端，搭配 `CLOUD_AUTH=api-key`、`CLOUD_API_VERSION`，生成、串流、tool calling、embedding、多步 Agent 全部通過；embedding 維度改變時自動重建、`EMBED_DIM` 設錯時 `app.check` 會指出、超過 2000 維時啟動直接報錯
+- 未用真實 key 驗證：OpenAI、Claude、Azure 端點，以及 Gemini 的 `dimensions` 參數（帳戶額度用完）。考試當天第 3 步的自檢就是為了這個
+
+---
+
 ## 設定
 
 所有設定都在 `.env`（範本：`.env.example`）。
 
 | 變數 | 預設 | 說明 |
 |---|---|---|
-| `LLM_PROVIDER` | `ollama` | `ollama` 或 `openai`（任何 OpenAI 相容端點） |
-| `EMBED_PROVIDER` | `ollama` | 同上，可與 LLM 分開設定 |
-| `CHAT_MODEL` | `qwen3.5:9b` | 生成模型 |
-| `EMBED_MODEL` | `bge-m3` | Embedding 模型 |
-| `EMBED_DIM` | `1024` | 向量維度，必須與 embedding 模型一致 |
-| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | Gemini 端點 / 空 | `openai` provider 用；key 留空時讀 `GEMINI_API_KEY` |
-| `LOCAL_AGENT_MODEL` / `CLOUD_AGENT_MODEL` | `qwen3.5:9b` / `gemini-flash-latest` | Agent 地端與雲端模式各自用的模型 |
+| `LLM_PROVIDER` | `ollama` | RAG 問答的生成：`ollama` 或 `openai`（下方 `CLOUD_*` 端點） |
+| `EMBED_PROVIDER` | `ollama` | 同上，可與生成分開設定 |
+| `EMBED_MODEL` / `EMBED_DIM` | `bge-m3` / `1024` | 向量維度必須與模型一致，上限 2000 |
+| `LOCAL_CHAT_MODEL` | `qwen3.5:9b` | 地端生成模型（RAG 地端、Agent · 地端） |
+| `CLOUD_BASE_URL` | Gemini 端點 | OpenAI 相容端點 |
+| `CLOUD_API_KEY` | 空 | 留空時讀 shell 的 `GEMINI_API_KEY` |
+| `CLOUD_CHAT_MODEL` | `gemini-flash-latest` | 雲端生成模型（RAG 雲端、Agent · 雲端） |
+| `CLOUD_AUTH` / `CLOUD_API_VERSION` | `bearer` / 空 | Azure 用 `api-key` 與 `2024-10-21` |
+| `CLOUD_EMBED_BASE_URL` / `CLOUD_EMBED_API_KEY` | 空 | embedding 走不同端點或 key 時才填 |
 | `AGENT_MAX_STEPS` | `6` | Agent 最多呼叫幾輪 LLM |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `500` / `80` | 切塊大小與重疊（字元） |
 | `TOP_K` | `4` | 檢索幾塊 |
@@ -325,23 +401,7 @@ for step in 1..AGENT_MAX_STEPS:
 | `SEMANTIC_CACHE_THRESHOLD` | `0.95` | 語意快取相似度門檻 |
 | `PG_*` / `REDIS_*` | 見範本 | 連線設定；port 刻意避開 5432 / 6379 |
 
-### 切換到雲端模型
-
-```env
-LLM_PROVIDER=openai
-OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-OPENAI_API_KEY=your-key
-CHAT_MODEL=gemini-flash-latest
-```
-
 只換生成、保留地端檢索是常見的混合架構：資料向量化在本機完成，只有檢索到的少量片段送到雲端。
-
-換 embedding 模型時維度通常會變（例如 `gemini-embedding-001` 是 768），要同步改 `EMBED_DIM` 並重建資料庫：
-
-```bash
-docker compose down -v && docker compose up -d --wait
-uv run --env-file .env python -m app.etl data
-```
 
 ---
 
@@ -353,12 +413,13 @@ uv run --env-file .env python -m app.etl data
 │   ├── main.py          FastAPI 路由、快取流程、SSE 串流、上傳驗證、上游錯誤轉換
 │   ├── agent.py         agent loop：呼叫 LLM、執行工具、回傳每一步事件
 │   ├── tools.py         工具定義（JSON Schema）與執行分派
+│   ├── check.py         供應商自檢：embedding 維度、生成、tool calling
 │   ├── products.py      商品表匯入與參數化查詢；也可當 CLI
-│   ├── etl.py           抽取、清洗、切塊、冪等寫入；也可當 CLI
+│   ├── etl.py           7 種格式抽取、清洗、切塊、冪等寫入；也可當 CLI
 │   ├── rag.py           檢索 SQL、system prompt、組 prompt
-│   ├── llm.py           embed / chat / chat_stream / chat_tools，Ollama 與 OpenAI 相容 API 兩種實作
+│   ├── llm.py           embed / chat / chat_stream / chat_tools；Ollama 與 OpenAI 相容（含 Azure）兩種實作
 │   ├── cache.py         L1 Redis 精確快取、L2 pgvector 語意快取、清除
-│   ├── db.py            schema 建立、連線池
+│   ├── db.py            schema 建立、維度變更時自動重建、連線池
 │   ├── config.py        讀取環境變數
 │   └── static/
 │       └── index.html   聊天介面

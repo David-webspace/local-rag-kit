@@ -16,8 +16,8 @@ def _normalize(question: str) -> str:
 
 
 def _key(question: str) -> str:
-    # key 帶上模型名稱，換模型後不會拿到舊模型的答案
-    raw = f"{config.CHAT_MODEL}|{config.TOP_K}|{_normalize(question)}"
+    # key 帶上模型名稱，換生成或 embedding 模型後不會拿到舊設定的答案
+    raw = f"{config.CHAT_MODEL}|{config.EMBED_MODEL}|{config.TOP_K}|{_normalize(question)}"
     return PREFIX + hashlib.sha256(raw.encode()).hexdigest()
 
 

@@ -1,28 +1,79 @@
 import csv
 import hashlib
 import io
+import json
 import re
 import sys
 from pathlib import Path
 
+from docx import Document
+from openpyxl import load_workbook
 from pypdf import PdfReader
 
 from app import cache, config, llm
 from app.db import init_schema, pool
 
 EMBED_BATCH = 32
+SUPPORTED = {".pdf", ".docx", ".md", ".txt", ".csv", ".xlsx", ".json"}
 
 
-def extract(filename: str, data: bytes) -> str:
+def _record(row: dict, prefix: str = "") -> str:
+    fields = "；".join(
+        f"{k}: {json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v}"
+        for k, v in row.items()
+        if v not in (None, "")
+    )
+    return f"{prefix}{fields}"
+
+
+def _xlsx_records(data: bytes) -> list[str]:
+    records = []
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    for ws in wb.worksheets:
+        rows = [r for r in ws.iter_rows(values_only=True) if any(c not in (None, "") for c in r)]
+        if not rows:
+            continue
+        header = [str(h) if h is not None else f"欄{i + 1}" for i, h in enumerate(rows[0])]
+        records += [_record(dict(zip(header, r)), f"[{ws.title}] ") for r in rows[1:]]
+    return records
+
+
+def _docx_text(data: bytes) -> str:
+    blocks = []
+    for item in Document(io.BytesIO(data)).iter_inner_content():
+        if hasattr(item, "rows"):
+            rows = [[c.text.strip() for c in r.cells] for r in item.rows]
+            blocks += [_record(dict(zip(rows[0], r))) for r in rows[1:]]
+            continue
+        text = item.text.strip()
+        if not text:
+            continue
+        # Word 標題樣式轉成 Markdown 標題，chunk() 才能依標題斷段
+        style = item.style.name if item.style is not None else ""
+        level = 1 if style == "Title" else int(style[8:]) if style.startswith("Heading ") and style[8:].isdigit() else 0
+        blocks.append(f"{'#' * level} {text}" if level else text)
+    return "\n\n".join(blocks)
+
+
+def split(filename: str, data: bytes) -> list[str]:
+    """表格類資料一筆一個 chunk（同一筆資料不會被切開）；文件類資料走 chunk()"""
     suffix = Path(filename).suffix.lower()
+    if suffix == ".xlsx":
+        return [clean(r) for r in _xlsx_records(data)]
     if suffix == ".pdf":
-        return "\n\n".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(data)).pages)
+        return chunk(clean("\n\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)))
+    if suffix == ".docx":
+        return chunk(clean(_docx_text(data)))
+
     text = data.decode("utf-8-sig")
     if suffix == ".csv":
-        # 每一列攤平成「欄位: 值」，ingest 時一列就是一個 chunk
-        rows = csv.DictReader(io.StringIO(text))
-        return "\n\n".join("；".join(f"{k}: {v}" for k, v in row.items() if v) for row in rows)
-    return text
+        return [clean(_record(row)) for row in csv.DictReader(io.StringIO(text))]
+    if suffix == ".json":
+        obj = json.loads(text)
+        if isinstance(obj, list) and all(isinstance(o, dict) for o in obj):
+            return [clean(_record(o)) for o in obj]
+        return chunk(clean(json.dumps(obj, ensure_ascii=False, indent=2)))
+    return chunk(clean(text))
 
 
 def clean(text: str) -> str:
@@ -45,8 +96,9 @@ def chunk(text: str, size: int = config.CHUNK_SIZE, overlap: int = config.CHUNK_
     chunks: list[str] = []
     current = ""
     for piece in pieces:
-        # Markdown 標題是主題邊界：直接斷開，不帶 overlap
-        if current and piece.startswith("#"):
+        # Markdown 標題是主題邊界：直接斷開，不帶 overlap；但只有標題的 chunk 沒有內容，併進下一段
+        only_headings = all(p.startswith("#") and "\n" not in p for p in current.split("\n\n"))
+        if current and piece.startswith("#") and not only_headings:
             chunks.append(current)
             current = piece
         elif current and len(current) + len(piece) + 2 > size:
@@ -66,8 +118,7 @@ def ingest(filename: str, data: bytes) -> dict:
     if row and row[0] == sha:
         return {"source": filename, "status": "unchanged", "chunks": 0}
 
-    text = clean(extract(filename, data))
-    chunks = text.split("\n\n") if filename.lower().endswith(".csv") else chunk(text)
+    chunks = [c for c in split(filename, data) if c]
     vectors: list[list[float]] = []
     for i in range(0, len(chunks), EMBED_BATCH):
         vectors.extend(llm.embed(chunks[i : i + EMBED_BATCH]))
@@ -94,6 +145,6 @@ if __name__ == "__main__":
     pool.open()
     for arg in sys.argv[1:]:
         for path in sorted(Path(arg).rglob("*")) if Path(arg).is_dir() else [Path(arg)]:
-            if path.is_file() and path.suffix.lower() in {".pdf", ".md", ".txt", ".csv"}:
+            if path.is_file() and path.suffix.lower() in SUPPORTED:
                 print(ingest(path.name, path.read_bytes()))
     pool.close()
