@@ -6,6 +6,13 @@ PG_DSN = (
     f"host={env['PG_HOST']} port={env['PG_PORT']} dbname={env['PG_DB']} "
     f"user={env['PG_USER']} password={env['PG_PASSWORD']}"
 )
+PG_READER_USER = env["PG_READER_USER"]
+PG_READER_PASSWORD = env["PG_READER_PASSWORD"]
+PG_READER_DSN = (
+    f"host={env['PG_HOST']} port={env['PG_PORT']} dbname={env['PG_DB']} "
+    f"user={PG_READER_USER} password={PG_READER_PASSWORD}"
+)
+DATA_SCHEMA = "data"
 REDIS_URL = f"redis://{env['REDIS_HOST']}:{env['REDIS_PORT']}/0"
 
 OLLAMA_URL = env["OLLAMA_URL"]

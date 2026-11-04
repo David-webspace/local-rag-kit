@@ -94,7 +94,9 @@
       <option value="cloud">Agent · 雲端</option>
     </select>
     <label class="toggle" id="cacheToggle"><input type="checkbox" id="useCache" checked>快取</label>
-    <button id="upload" type="button">上傳文件</button>
+    <button id="upload" type="button" title="PDF / Word / MD / CSV / Excel / JSON → 向量知識庫">上傳文件</button>
+    <button id="importTable" type="button" title="CSV / Excel → 資料表，Agent 可用 SQL 查詢">匯入資料表</button>
+    <input type="file" id="tableFile" multiple accept=".csv,.xlsx" hidden>
     <input type="file" id="file" multiple accept=".pdf,.docx,.md,.txt,.csv,.xlsx,.json" hidden>
     <button id="clearCache" type="button">清快取</button>
   </div>
@@ -303,23 +305,30 @@ $("mode").addEventListener("change", (e) => {
   $("cacheToggle").hidden = e.target.value !== "rag";
 });
 
-$("file").addEventListener("change", async (e) => {
-  const files = [...e.target.files];
+async function upload(input, url, summarize) {
+  const files = [...input.files];
   if (!files.length) return;
   const form = new FormData();
   files.forEach((f) => form.append("files", f));
   toast(`上傳中：${files.length} 個檔案…`);
   try {
-    const res = await fetch("/ingest", { method: "POST", body: form });
+    const res = await fetch(url, { method: "POST", body: form });
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
-    toast(body.map((r) => `${r.source}：${r.status}${r.chunks ? `（${r.chunks} chunks）` : ""}`).join("、"));
+    toast(body.map(summarize).join("、"));
     refreshStatus();
   } catch (err) {
     toast(`上傳失敗：${err.message}`);
   }
-  e.target.value = "";
-});
+  input.value = "";
+}
+
+$("file").addEventListener("change", (e) =>
+  upload(e.target, "/ingest", (r) => `${r.source}：${r.status}${r.chunks ? `（${r.chunks} chunks）` : ""}`));
+
+$("importTable").addEventListener("click", () => $("tableFile").click());
+$("tableFile").addEventListener("change", (e) =>
+  upload(e.target, "/tables", (r) => r.error ? `${r.table}：${r.error}` : `${r.table}：${r.rows} 列、${r.columns.length} 欄`));
 
 $("clearCache").addEventListener("click", async () => {
   const r = await (await fetch("/cache", { method: "DELETE" })).json();

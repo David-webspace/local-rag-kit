@@ -10,8 +10,8 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app import agent, cache, config, llm, rag
-from app.db import init_schema, pool
+from app import agent, cache, config, llm, rag, tables
+from app.db import close_pools, init_schema, open_pools, pool
 from app.etl import SUPPORTED, ingest
 
 logger = logging.getLogger("uvicorn.error")
@@ -22,9 +22,9 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_schema()
-    pool.open()
+    open_pools()
     yield
-    pool.close()
+    close_pools()
 
 
 app = FastAPI(title="local-rag-kit", lifespan=lifespan)
@@ -65,19 +65,33 @@ def health() -> dict:
             "llm": f"{config.LLM_PROVIDER}:{config.CHAT_MODEL}", "embed": f"{config.EMBED_PROVIDER}:{config.EMBED_MODEL}"}
 
 
-@app.post("/ingest")
-async def ingest_files(files: list[UploadFile]) -> list[dict]:
-    results = []
+async def read_uploads(files: list[UploadFile], allowed: set[str]) -> list[tuple[str, bytes]]:
+    out = []
     for f in files:
-        # 檔名只用來當 source 顯示，不拿去拼檔案路徑
+        # 檔名只用來當 source / 表名顯示，不拿去拼檔案路徑；表名進 SQL 前一律經 sql.Identifier 跳脫
         name = Path(f.filename or "upload").name
-        if Path(name).suffix.lower() not in ALLOWED_SUFFIXES:
+        if Path(name).suffix.lower() not in allowed:
             raise HTTPException(400, f"不支援的檔案類型：{name}")
         data = await f.read(MAX_UPLOAD_BYTES + 1)
         if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(413, f"檔案超過 20MB：{name}")
-        results.append(ingest(name, data))
-    return results
+        out.append((name, data))
+    return out
+
+
+@app.post("/ingest")
+async def ingest_files(files: list[UploadFile]) -> list[dict]:
+    return [ingest(name, data) for name, data in await read_uploads(files, ALLOWED_SUFFIXES)]
+
+
+@app.post("/tables")
+async def import_tables(files: list[UploadFile]) -> list[dict]:
+    return [r for name, data in await read_uploads(files, tables.TABULAR) for r in tables.import_file(name, data)]
+
+
+@app.get("/tables")
+def list_tables() -> list[dict]:
+    return tables.describe()
 
 
 @app.get("/search")

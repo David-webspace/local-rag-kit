@@ -55,15 +55,22 @@ def _docx_text(data: bytes) -> str:
     return "\n\n".join(blocks)
 
 
+def document_text(filename: str, data: bytes) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf":
+        return clean("\n\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages))
+    if suffix == ".docx":
+        return clean(_docx_text(data))
+    return clean(data.decode("utf-8-sig"))
+
+
 def split(filename: str, data: bytes) -> list[str]:
     """表格類資料一筆一個 chunk（同一筆資料不會被切開）；文件類資料走 chunk()"""
     suffix = Path(filename).suffix.lower()
     if suffix == ".xlsx":
         return [clean(r) for r in _xlsx_records(data)]
-    if suffix == ".pdf":
-        return chunk(clean("\n\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)))
-    if suffix == ".docx":
-        return chunk(clean(_docx_text(data)))
+    if suffix in (".pdf", ".docx"):
+        return chunk(document_text(filename, data))
 
     text = data.decode("utf-8-sig")
     if suffix == ".csv":

@@ -1,0 +1,78 @@
+{
+  "type": "object",
+  "properties": {
+    "客戶名稱": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "公司名稱（中文優先），常出現在開頭自我介紹或結尾署名；信中沒寫就填 null"
+    },
+    "產品SKU": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "SV-100",
+        "SV-200",
+        "SV-300",
+        "DB-10",
+        "DB-20",
+        "DB-30",
+        "ST-01",
+        "ST-02",
+        "AI-01",
+        "AI-02",
+        "AI-03",
+        "NW-01",
+        null
+      ],
+      "description": "信中提到的產品。只寫名稱時依此對照：SV-100 雲主機 Basic、SV-200 雲主機 Pro、SV-300 GPU 雲主機、DB-10 託管 PostgreSQL、DB-20 託管 Redis、DB-30 託管 MySQL、ST-01 物件儲存 1TB、ST-02 物件儲存 10TB、AI-01 私有 LLM 部署、AI-02 AI 客服機器人、AI-03 文件 OCR API、NW-01 專屬 VPN。無法確定是哪一個就填 null"
+    },
+    "問題類型": {
+      "type": "string",
+      "enum": [
+        "服務中斷",
+        "效能",
+        "帳務",
+        "客服態度",
+        "功能建議",
+        "其他"
+      ]
+    },
+    "嚴重度": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "1 = 建議或小問題，3 = 影響部分業務，5 = 核心業務完全停擺"
+    },
+    "要求退款": {
+      "type": "boolean",
+      "description": "信中明確、無條件地要求退款、退費或補償才是 true；「若…就會要求退款」這種條件式仍是 false"
+    },
+    "發生日期": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date",
+      "description": "YYYY-MM-DD；只有「昨天」「上週」這類相對日期時填 null，不要推算"
+    },
+    "摘要": {
+      "type": "string",
+      "maxLength": 60,
+      "description": "一句話摘要，60 字內"
+    }
+  },
+  "required": [
+    "客戶名稱",
+    "產品SKU",
+    "問題類型",
+    "嚴重度",
+    "要求退款",
+    "發生日期",
+    "摘要"
+  ],
+  "additionalProperties": false
+}

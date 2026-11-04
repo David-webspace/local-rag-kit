@@ -92,6 +92,22 @@ def chat_tools(messages: list[dict], tools: list[dict] | None, provider: str, mo
     return {"content": msg.get("content") or "", "tool_calls": calls, "message": msg, "usage": usage}
 
 
+def chat_json(messages: list[dict], schema: dict, provider: str, model: str) -> tuple[str, dict]:
+    """要求模型輸出 JSON。Ollama 用 format 直接約束到 schema；OpenAI 相容端點用 json_object，schema 放在 prompt"""
+    if provider == "ollama":
+        body = _ollama_chat_body(messages, model, 0, False)
+        body["format"] = schema
+        r = _client.post(f"{config.OLLAMA_URL}/api/chat", json=body)
+        r.raise_for_status()
+        data = r.json()
+        return data["message"]["content"], {"input": data.get("prompt_eval_count", 0), "output": data.get("eval_count", 0)}
+    data = _cloud_post("/chat/completions", {
+        "model": model, "messages": messages, "temperature": 0, "response_format": {"type": "json_object"},
+    })
+    u = data.get("usage") or {}
+    return data["choices"][0]["message"]["content"] or "", {"input": u.get("prompt_tokens", 0), "output": u.get("completion_tokens", 0)}
+
+
 def tool_message(provider: str, call: dict, content: str) -> dict:
     if provider == "ollama":
         return {"role": "tool", "tool_name": call["name"], "content": content}
