@@ -1,0 +1,5 @@
+sku,name,category,price,stock,description
+SV-100,星宇雲主機 Basic,雲主機,990,120,2 vCPU 4GB RAM，適合個人網站
+SV-200,星宇雲主機 Pro,雲主機,2990,45,8 vCPU 16GB RAM，含每日備份
+DB-10,託管 PostgreSQL,資料庫,1590,80,含 pgvector 擴充，自動備份 7 天
+AI-01,私有 LLM 部署方案,AI 服務,49000,5,地端部署開源模型，資料不出公司，含 RAG 知識庫建置
