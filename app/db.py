@@ -49,6 +49,18 @@ def init_schema() -> None:
             "CREATE INDEX IF NOT EXISTS semantic_cache_embedding_hnsw "
             "ON semantic_cache USING hnsw (embedding vector_cosine_ops)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS products (
+                sku         TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                category    TEXT NOT NULL,
+                price       INT NOT NULL,
+                stock       INT NOT NULL,
+                description TEXT NOT NULL
+            )
+            """
+        )
 
 
 pool = ConnectionPool(config.PG_DSN, min_size=1, max_size=5, open=False, configure=register_vector)

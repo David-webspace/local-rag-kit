@@ -1,17 +1,20 @@
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app import cache, config, llm, rag
+from app import agent, cache, config, llm, rag
 from app.db import init_schema, pool
 from app.etl import ingest
 
+logger = logging.getLogger("uvicorn.error")
 ALLOWED_SUFFIXES = {".pdf", ".md", ".txt", ".csv"}
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
@@ -30,6 +33,20 @@ app = FastAPI(title="local-rag-kit", lifespan=lifespan)
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     use_cache: bool = True
+
+
+class AgentRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    target: Literal["local", "cloud"] = "local"
+
+
+UPSTREAM_ERRORS = {401: "雲端 API key 無效", 402: "雲端 API 額度不足", 429: "雲端 API 請求過於頻繁"}
+
+
+def upstream_error(e: httpx.HTTPStatusError) -> str:
+    # 只回狀態碼對應的固定訊息，不把上游回應內容（可能含帳號、專案資訊）轉給前端
+    logger.warning("upstream %s: %s", e.response.status_code, e.response.text[:500])
+    return UPSTREAM_ERRORS.get(e.response.status_code, f"模型服務錯誤（HTTP {e.response.status_code}）")
 
 
 @app.get("/", include_in_schema=False)
@@ -139,6 +156,28 @@ def ask_stream(req: AskRequest) -> StreamingResponse:
         if req.use_cache:
             save_cache(req.question, embedding, {"answer": "".join(parts), "sources": sources})
         yield done("miss")
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.post("/agent")
+def run_agent(req: AgentRequest) -> dict:
+    try:
+        events = list(agent.run(req.question, req.target))
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, upstream_error(e))
+    answer = next((e["content"] for e in events if e["type"] == "answer"), "")
+    return {"answer": answer, "trace": [e for e in events if e["type"].startswith("tool")], **events[-1]}
+
+
+@app.post("/agent/stream")
+def run_agent_stream(req: AgentRequest) -> StreamingResponse:
+    def events():
+        try:
+            for e in agent.run(req.question, req.target):
+                yield sse(e, e["type"])
+        except httpx.HTTPStatusError as e:
+            yield sse({"message": upstream_error(e)}, "error")
 
     return StreamingResponse(events(), media_type="text/event-stream")
 

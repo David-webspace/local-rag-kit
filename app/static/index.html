@@ -16,6 +16,7 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--text);
@@ -36,6 +37,16 @@
     border-radius: 8px; padding: 6px 10px; cursor: pointer;
   }
   button:hover { border-color: var(--muted); }
+  select {
+    font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+    border-radius: 8px; padding: 5px 8px;
+  }
+  .steps { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; white-space: normal; }
+  .step { font-size: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--bg); min-width: 0; }
+  .step .call { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .step .call b { color: var(--accent); }
+  .step pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: 11px; max-height: 180px; overflow-y: auto; }
+  .step details { margin-top: 2px; }
   button:disabled { opacity: .5; cursor: default; }
   label.toggle { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; cursor: pointer; }
   main { flex: 1; overflow-y: auto; padding: 20px 16px; }
@@ -77,7 +88,12 @@
   <h1>RAG Chat</h1>
   <span class="status" id="status"><span class="dot"></span>連線中…</span>
   <div class="tools">
-    <label class="toggle"><input type="checkbox" id="useCache" checked>快取</label>
+    <select id="mode" aria-label="模式">
+      <option value="rag">RAG 問答</option>
+      <option value="local">Agent · 地端</option>
+      <option value="cloud">Agent · 雲端</option>
+    </select>
+    <label class="toggle" id="cacheToggle"><input type="checkbox" id="useCache" checked>快取</label>
     <button id="upload" type="button">上傳文件</button>
     <input type="file" id="file" multiple accept=".pdf,.md,.txt,.csv" hidden>
     <button id="clearCache" type="button">清快取</button>
@@ -121,7 +137,10 @@ function escapeHtml(s) {
 }
 
 function renderAnswer(text) {
-  return escapeHtml(text).replace(/\[(\d+)\]/g, "<sup>[$1]</sup>");
+  return escapeHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/^\s*[*-] /gm, "• ")
+    .replace(/\[(\d+)\]/g, "<sup>[$1]</sup>");
 }
 
 async function refreshStatus() {
@@ -160,51 +179,86 @@ function setBusy(busy) {
   input.disabled = busy;
 }
 
+async function streamSSE(url, body, onEvent) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const reader = res.body.getReader(), decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      let event = "message", data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event: ")) event = line.slice(7);
+        else if (line.startsWith("data: ")) data += line.slice(6);
+      }
+      onEvent(event, JSON.parse(data));
+      scroller.scrollTop = scroller.scrollHeight;
+    }
+  }
+}
+
+function addStep(stepsEl, e) {
+  const div = document.createElement("div");
+  div.className = "step";
+  div.innerHTML = `<div class="call">步驟 ${e.step} · <b>${escapeHtml(e.name)}</b>(${escapeHtml(JSON.stringify(e.arguments))})</div><details><summary>等待結果…</summary></details>`;
+  stepsEl.appendChild(div);
+}
+
+function fillStep(stepsEl, e) {
+  const details = [...stepsEl.querySelectorAll("details")].find((d) => !d.dataset.done);
+  if (!details) return;
+  details.dataset.done = "1";
+  details.innerHTML = `<summary>結果 · ${e.ms} ms</summary><pre>${escapeHtml(e.preview)}</pre>`;
+}
+
 async function ask(question) {
   addMessage("user", question);
   const bot = addMessage("bot");
   bot.classList.add("pending");
   const answerEl = bot.querySelector(".answer"), meta = bot.querySelector(".meta");
+  const mode = $("mode").value;
   let answer = "", sources = [];
 
   controller = new AbortController();
   setBusy(true);
   try {
-    const res = await fetch("/ask/stream", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question, use_cache: $("useCache").checked }),
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const reader = res.body.getReader(), decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buffer.indexOf("\n\n")) >= 0) {
-        const block = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        let event = "message", data = "";
-        for (const line of block.split("\n")) {
-          if (line.startsWith("event: ")) event = line.slice(7);
-          else if (line.startsWith("data: ")) data += line.slice(6);
-        }
-        const payload = JSON.parse(data);
+    if (mode === "rag") {
+      await streamSSE("/ask/stream", { question, use_cache: $("useCache").checked }, (event, payload) => {
         if (event === "sources") sources = payload;
         else if (event === "done") {
           meta.innerHTML = `<span class="tag ${payload.cache}">${payload.cache === "miss" ? "未命中快取" : `快取命中：${payload.cache}`}</span><span>${payload.ms} ms</span>`;
         } else {
           answer += payload;
           answerEl.innerHTML = renderAnswer(answer);
-          scroller.scrollTop = scroller.scrollHeight;
         }
-      }
+      });
+      renderSources(bot, sources);
+    } else {
+      const stepsEl = document.createElement("div");
+      stepsEl.className = "steps";
+      bot.prepend(stepsEl);
+      await streamSSE("/agent/stream", { question, target: mode }, (event, payload) => {
+        if (event === "tool_call") addStep(stepsEl, payload);
+        else if (event === "tool_result") fillStep(stepsEl, payload);
+        else if (event === "answer") answerEl.innerHTML = renderAnswer(payload.content);
+        else if (event === "error") answerEl.innerHTML = `<div class="error">${escapeHtml(payload.message)}</div>`;
+        else if (event === "done") {
+          const u = payload.usage;
+          meta.innerHTML = `<span class="tag">${escapeHtml(payload.model)}</span><span>${payload.steps} 輪 · ${payload.ms} ms · tokens ${u.input} / ${u.output}</span>`;
+        }
+      });
     }
-    renderSources(bot, sources);
   } catch (err) {
     if (err.name === "AbortError") meta.innerHTML = `<span class="tag">已停止</span>`;
     else answerEl.innerHTML += `<div class="error">請求失敗：${escapeHtml(err.message)}</div>`;
@@ -244,6 +298,10 @@ thread.addEventListener("click", (e) => {
 });
 
 $("upload").addEventListener("click", () => $("file").click());
+
+$("mode").addEventListener("change", (e) => {
+  $("cacheToggle").hidden = e.target.value !== "rag";
+});
 
 $("file").addEventListener("change", async (e) => {
   const files = [...e.target.files];
